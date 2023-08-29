@@ -13,3 +13,4 @@ futures = { version = "0.3.28" }
 bytes = { version = "1.4.0" }
 snow = { version = "0.9.3" }
 num_enum = "0.7.0"
+clap = { version = "4.4.1" }
