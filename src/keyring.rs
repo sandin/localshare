@@ -1,13 +1,17 @@
-use std::path::PathBuf;
+use base64ct::{Base64, Encoding};
+use snow::Keypair;
 use std::error::Error;
 use std::fs::File;
-use std::io::{Write, Read};
-use snow::Keypair;
-use base64ct::{Base64, Encoding};
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+pub fn serialize_key(input: &[u8]) -> String {
+    return Base64::encode_string(input);
+}
 
 pub fn write_keypair_to_file(keypair: &Keypair, output: &PathBuf) -> Result<(), Box<dyn Error>> {
-    let public_key = Base64::encode_string(&keypair.public);
-    let private_key = Base64::encode_string(&keypair.private);
+    let public_key = serialize_key(&keypair.public);
+    let private_key = serialize_key(&keypair.private);
     let key_config = format!(
         "PublicKey = {}\nPrivateKey = {}\n",
         public_key.as_str(),
@@ -21,13 +25,12 @@ pub fn write_keypair_to_file(keypair: &Keypair, output: &PathBuf) -> Result<(), 
     Ok(())
 }
 
-
 pub fn read_keypair_from_file(filename: &PathBuf) -> Result<Keypair, Box<dyn Error>> {
     let mut file = File::open(filename)?;
     let mut content = String::new();
     file.read_to_string(&mut content)?;
 
-    let mut lines = content.split('\n');
+    let lines = content.split('\n');
     let mut public_key = None;
     let mut private_key = None;
     for line in lines {
@@ -43,5 +46,8 @@ pub fn read_keypair_from_file(filename: &PathBuf) -> Result<Keypair, Box<dyn Err
         return Err(Box::from("bad key file"));
     }
 
-    Ok(Keypair { private: private_key.unwrap().clone(), public: public_key.unwrap().clone() })
+    Ok(Keypair {
+        private: private_key.unwrap().clone(),
+        public: public_key.unwrap().clone(),
+    })
 }

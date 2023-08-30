@@ -1,22 +1,20 @@
-mod command;
+mod message;
 mod keyring;
+mod noise;
 
-use base64ct::{Base64, Encoding};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use clap::{arg, Command};
 use futures::SinkExt;
-use std::convert::TryFrom;
+use std::error::Error;
 use std::sync::Arc;
-use std::{env, error::Error, fmt, io};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use crate::command::{Command as Cmd, CommandType};
+use crate::message::{Message, MessageType};
 use crate::keyring::{read_keypair_from_file, write_keypair_to_file};
-
-static SECRET: &[u8] = b"i don't care for fidget spinners";
+use crate::noise::{gen_keypair, initiator_handshake, responder_handshake};
 
 struct Context {
     keypair: snow::Keypair,
@@ -82,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let output = matches
                 .get_one::<std::path::PathBuf>("OUTPUT")
                 .expect("required");
-            gen_keypair(output).await?;
+            gen_keyring_file(output).await?;
         }
         _ => unreachable!("clap should ensure we don't get here"),
     };
@@ -90,10 +88,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn gen_keypair(output: &std::path::PathBuf) -> Result<(), Box<dyn Error>> {
-    let builder: snow::Builder<'_> =
-        snow::Builder::new("Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
-    let keypair = builder.generate_keypair().unwrap();
+async fn gen_keyring_file(output: &std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+    let keypair = gen_keypair()?;
 
     write_keypair_to_file(&keypair, output)?;
     println!("keyring saved at {:?}", output);
@@ -125,64 +121,28 @@ async fn handle_client(
     stream: TcpStream,
 ) -> Result<(), Box<dyn Error>> {
     let codec = LengthDelimitedCodec::builder().little_endian().new_codec();
-    let mut transport = Framed::new(stream, codec);
+    let mut transport: Framed<TcpStream, LengthDelimitedCodec> = Framed::new(stream, codec);
+    let mut buf = vec![0u8; 65535];
 
-    // handshake
-    let builder: snow::Builder<'_> =
-        snow::Builder::new("Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
     let context = context.lock().await;
     let static_key = &context.keypair.private;
-    let mut handshake = builder
-        .local_private_key(static_key)
-        .psk(3, SECRET)
-        .build_responder()
-        .unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut noise;// : Option<snow::TransportState> = None;
-    loop {
-        if handshake.is_handshake_finished() {
-            println!("handshake complete");
-            //noise1 = Some(noise.into_transport_mode().unwrap());
-            noise = handshake.into_transport_mode().unwrap();
-            break;
-        }
-        let request = transport.next().await.unwrap()?;
-        let mut data = request.freeze();
-        let cmd = Cmd::new(&mut data); 
-        if cmd.cmd == CommandType::Handshake as u32 {
-            println!("<- e: {:?}", cmd.payload);
-            handshake.read_message(&cmd.payload, &mut buf)?;
-
-            let len = handshake.write_message(&[], &mut buf).unwrap();
-            let cmd = Cmd {
-                cmd: CommandType::Handshake as u32,
-                payload: Bytes::copy_from_slice(&buf[..len]),
-            };
-            transport.send(cmd.as_bytes()).await?;
-            println!("<- e, ee, s, es: {:?}", cmd.payload);
-        } else if cmd.cmd == CommandType::Handshake1 as u32 {
-            println!("<- s, se: {:?}", cmd.payload);
-            handshake.read_message(&cmd.payload, &mut buf)?;
-        }
-    }
-
-    let cmd = Cmd {
-        cmd: CommandType::Handshake1 as u32,
-        payload: Bytes::new(),
-    };
-    let len = noise.write_message(&cmd.as_bytes(), &mut buf).unwrap();
-    let data = Bytes::copy_from_slice(&buf[..len]);
-    transport.send(data).await?;
-    println!("send secured message");
+    let mut noise = responder_handshake(&mut transport, static_key).await?;
 
     while let Some(request) = transport.next().await {
         match request {
             Ok(request) => {
-                println!("Got request: {:?}", request);
-                let response = handle_request(&mut noise, request).await?;
-                println!("Send response: {:?}", response);
-                transport.send(response).await?;
+                let mut data = request.freeze();
+                println!("Got message(cyphertext): {:?}", data);
+                let len = noise.read_message(&data, &mut buf).unwrap();
+                data = Bytes::copy_from_slice(&buf[..len]);
+                println!("Got message(plaintext): {:?}", data);
+
+                let response = handle_request(&mut data).await?;
+                println!("Send message(plaintext): {:?}", response);
+                let len = noise.write_message(&response, &mut buf).unwrap();
+                let data = Bytes::copy_from_slice(&buf[..len]);
+                println!("Send message(cyphertext): {:?}", data);
+                transport.send(data).await?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -191,28 +151,29 @@ async fn handle_client(
     Ok(())
 }
 
-async fn handle_request(
-    noise: &mut snow::TransportState,
-    req: BytesMut,
-) -> Result<Bytes, Box<dyn Error>> {
-    let mut data = req.freeze();
-    let cmd = Cmd::new(&mut data);
-    //println!("Got cmd: {:?}", cmd);
+async fn handle_request(data: &mut Bytes) -> Result<Bytes, Box<dyn Error>> {
+    let msg = Message::new(data);
+    println!("Got cmd: {:?}", msg);
 
-    let mut buf = vec![0u8; 65535];
-
-    match CommandType::try_from(cmd.cmd) {
-        Ok(CommandType::Push) => {
+    match MessageType::try_from(msg.cmd) {
+        Ok(MessageType::Ping) => {
+            let resp = Message {
+                cmd: MessageType::Pong as u32,
+                payload: Bytes::copy_from_slice(b"Secret Message"),
+            };
+            return Ok(resp.as_bytes());
+        }
+        Ok(MessageType::Push) => {
             // TODO
         }
-        Ok(CommandType::Pull) => {
+        Ok(MessageType::Pull) => {
             // TODO
         }
         _ => {
-            println!("unknown cmd: {}", cmd.cmd);
+            println!("unknown cmd: {}", msg.cmd);
         }
     }
-    Ok(data)
+    Ok(Bytes::new())
 }
 
 async fn start_client(addr: &String, keyfile: &std::path::PathBuf) -> Result<(), Box<dyn Error>> {
@@ -224,67 +185,29 @@ async fn start_client(addr: &String, keyfile: &std::path::PathBuf) -> Result<(),
     let mut transport = Framed::new(stream, codec);
 
     let mut buf = vec![0u8; 65535];
-    let builder: snow::Builder<'_> =
-        snow::Builder::new("Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
-    let mut handshake = builder
-        .local_private_key(static_key)
-        .psk(3, SECRET)
-        .build_initiator()
-        .unwrap();
 
-    // send handshake
-    let len = handshake.write_message(&[], &mut buf).unwrap();
-    let cmd = Cmd {
-        cmd: CommandType::Handshake as u32,
-        payload: Bytes::copy_from_slice(&buf[..len]),
+    let mut noise = initiator_handshake(&mut transport, static_key).await?;
+
+    let cmd = Message {
+        cmd: MessageType::Ping as u32,
+        payload: Bytes::copy_from_slice(b"Secret Message"),
     };
-    transport.send(cmd.as_bytes()).await.unwrap();
-    println!("-> e: {:?}", cmd.payload);
-
-    // recv handshake
-    let request = transport.next().await.unwrap()?;
-    let mut data = request.freeze();
-    let cmd = Cmd::new(&mut data);
-    if cmd.cmd != CommandType::Handshake as u32 {
-        return Err(Box::from("invalid cmd"));
-    }
-    println!("<- e, ee, s, es: {:?}", cmd.payload);
-    handshake.read_message(&data, &mut buf).unwrap();
-
-    // send handshake1
-    let len = handshake.write_message(&[], &mut buf).unwrap();
-    let cmd = Cmd {
-        cmd: CommandType::Handshake1 as u32,
-        payload: Bytes::copy_from_slice(&buf[..len]),
-    };
-    transport.send(cmd.as_bytes()).await.unwrap();
-    println!("-> s, se: {:?}", cmd.payload);
-
-    if !handshake.is_handshake_finished() {
-        return Err(Box::from("invalid state"));
-    }
-    let mut noise = handshake.into_transport_mode().unwrap();
-
-    // recv handshake1(secured message)
-    let request = transport.next().await.unwrap()?;
-    let mut data = request.freeze();
-    println!("Got secured message: {:?}", data);
-    let len = noise.read_message(&data, &mut buf).unwrap();
-    data = Bytes::copy_from_slice(&buf[..len]);
-    println!("Decode secured message: {:?}", data);
-    let cmd = Cmd::new(&mut data);
-    println!("Parse secured message: {:?}", cmd);
-    if cmd.cmd != CommandType::Handshake1 as u32 {
-        return Err(Box::from("invalid cmd, expect Handshake1"));
-    }
+    let len = noise.write_message(&cmd.as_bytes(), &mut buf).unwrap();
+    let data = Bytes::copy_from_slice(&buf[..len]);
+    transport.send(data).await?;
+    println!("send the first secured message(PING)");
 
     // secureline
     while let Some(request) = transport.next().await {
         match request {
             Ok(request) => {
-                println!("Got request: {:?}", request);
                 let mut data = request.freeze();
-                let cmd = Cmd::new(&mut data);
+                println!("Got message(cyphertext): {:?}", data);
+                let len = noise.read_message(&data, &mut buf).unwrap();
+                data = Bytes::copy_from_slice(&buf[..len]);
+                println!("Got message(plaintext): {:?}", data);
+
+                let cmd = Message::new(&mut data);
                 println!("Got cmd: {:?}", cmd);
             }
             Err(e) => return Err(e.into()),
