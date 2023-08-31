@@ -5,11 +5,11 @@ use snow::{params::NoiseParams, Keypair, TransportState};
 use std::error::Error;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
-use tokio_util::codec::{Framed};
+use tokio_util::codec::Framed;
 
 use crate::codec::NoiseMessageCodec;
-use crate::message::{Message, MessageType};
 use crate::keyring::serialize_key;
+use crate::message::{Deserializable, Message, MessageType, Serializable};
 
 static SECRET: &[u8] = &[
     0xb5, 0x34, 0x9c, 0x8f, 0xea, 0x4f, 0xb1, 0x0d, 0xbc, 0xe3, 0x38, 0xe4, 0x35, 0x41, 0x7a, 0x8d,
@@ -45,7 +45,7 @@ pub async fn responder_handshake(
         }
         let request = transport.next().await.unwrap()?;
         let mut data = request.freeze();
-        let msg = Message::new(&mut data);
+        let msg = Message::deserialize(&mut data);
         if msg.cmd == MessageType::Handshake as u32 {
             println!("<- e: {:?}", msg.payload);
             handshake.read_message(&msg.payload, &mut buf)?;
@@ -55,7 +55,7 @@ pub async fn responder_handshake(
                 cmd: MessageType::Handshake as u32,
                 payload: Bytes::copy_from_slice(&buf[..len]),
             };
-            transport.send(cmd.as_bytes()).await?;
+            transport.send(cmd.serialize()).await?;
             println!("-> e, ee, s, es: {:?}", cmd.payload);
         } else if msg.cmd == MessageType::Handshake1 as u32 {
             println!("<- s, se: {:?}", msg.payload);
@@ -87,7 +87,7 @@ pub async fn initiator_handshake(
         cmd: MessageType::Handshake as u32,
         payload: Bytes::copy_from_slice(&buf[..len]),
     };
-    transport.send(cmd.as_bytes()).await.unwrap();
+    transport.send(cmd.serialize()).await.unwrap();
     println!("-> e: {:?}", cmd.payload);
 
     let noise;
@@ -99,7 +99,7 @@ pub async fn initiator_handshake(
         }
         let request = transport.next().await.unwrap()?;
         let mut data = request.freeze();
-        let cmd = Message::new(&mut data);
+        let cmd = Message::deserialize(&mut data);
         if cmd.cmd == MessageType::Handshake as u32 {
             println!("<- e, ee, s, es: {:?}", cmd.payload);
             handshake.read_message(&cmd.payload, &mut buf)?;
@@ -112,7 +112,7 @@ pub async fn initiator_handshake(
                 cmd: MessageType::Handshake1 as u32,
                 payload: Bytes::copy_from_slice(&buf[..len]),
             };
-            transport.send(cmd.as_bytes()).await?;
+            transport.send(cmd.serialize()).await?;
             println!("-> s, se: {:?}", cmd.payload);
         }
     }
