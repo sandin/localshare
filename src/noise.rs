@@ -5,8 +5,9 @@ use snow::{params::NoiseParams, Keypair, TransportState};
 use std::error::Error;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::codec::{Framed};
 
+use crate::codec::NoiseMessageCodec;
 use crate::message::{Message, MessageType};
 use crate::keyring::serialize_key;
 
@@ -24,7 +25,7 @@ pub fn gen_keypair() -> Result<Keypair, Box<dyn Error>> {
 }
 
 pub async fn responder_handshake(
-    transport: &mut Framed<TcpStream, LengthDelimitedCodec>,
+    transport: &mut Framed<TcpStream, NoiseMessageCodec>,
     static_key: &Vec<u8>,
 ) -> Result<TransportState, Box<dyn Error>> {
     let builder: snow::Builder<'_> = snow::Builder::new(PARAMS.clone());
@@ -69,7 +70,7 @@ pub async fn responder_handshake(
 }
 
 pub async fn initiator_handshake(
-    transport: &mut Framed<TcpStream, LengthDelimitedCodec>,
+    transport: &mut Framed<TcpStream, NoiseMessageCodec>,
     static_key: &Vec<u8>,
 ) -> Result<TransportState, Box<dyn Error>> {
     let builder: snow::Builder<'_> = snow::Builder::new(PARAMS.clone());

@@ -1,5 +1,6 @@
-mod message;
+mod codec;
 mod keyring;
+mod message;
 mod noise;
 
 use bytes::Bytes;
@@ -10,10 +11,11 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::codec::Framed;
 
-use crate::message::{Message, MessageType};
+use crate::codec::NoiseMessageCodec;
 use crate::keyring::{read_keypair_from_file, write_keypair_to_file};
+use crate::message::{Message, MessageType};
 use crate::noise::{gen_keypair, initiator_handshake, responder_handshake};
 
 struct Context {
@@ -120,29 +122,19 @@ async fn handle_client(
     context: Arc<Mutex<Context>>,
     stream: TcpStream,
 ) -> Result<(), Box<dyn Error>> {
-    let codec = LengthDelimitedCodec::builder().little_endian().new_codec();
-    let mut transport: Framed<TcpStream, LengthDelimitedCodec> = Framed::new(stream, codec);
-    let mut buf = vec![0u8; 65535];
-
     let context = context.lock().await;
     let static_key = &context.keypair.private;
-    let mut noise = responder_handshake(&mut transport, static_key).await?;
+
+    let mut transport = Framed::new(stream, NoiseMessageCodec::new());
+    let noise = responder_handshake(&mut transport, static_key).await?;
+    transport.codec_mut().set_noise(noise);
 
     while let Some(request) = transport.next().await {
         match request {
             Ok(request) => {
                 let mut data = request.freeze();
-                println!("Got message(cyphertext): {:?}", data);
-                let len = noise.read_message(&data, &mut buf).unwrap();
-                data = Bytes::copy_from_slice(&buf[..len]);
-                println!("Got message(plaintext): {:?}", data);
-
                 let response = handle_request(&mut data).await?;
-                println!("Send message(plaintext): {:?}", response);
-                let len = noise.write_message(&response, &mut buf).unwrap();
-                let data = Bytes::copy_from_slice(&buf[..len]);
-                println!("Send message(cyphertext): {:?}", data);
-                transport.send(data).await?;
+                transport.send(response).await?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -159,8 +151,9 @@ async fn handle_request(data: &mut Bytes) -> Result<Bytes, Box<dyn Error>> {
         Ok(MessageType::Ping) => {
             let resp = Message {
                 cmd: MessageType::Pong as u32,
-                payload: Bytes::copy_from_slice(b"Secret Message"),
+                payload: Bytes::copy_from_slice(b"Secret Pong"),
             };
+            println!("Send msg: {:?}", resp);
             return Ok(resp.as_bytes());
         }
         Ok(MessageType::Push) => {
@@ -181,32 +174,22 @@ async fn start_client(addr: &String, keyfile: &std::path::PathBuf) -> Result<(),
     let static_key = &keypair.private;
 
     let stream = TcpStream::connect(addr).await.unwrap();
-    let codec = LengthDelimitedCodec::builder().little_endian().new_codec();
-    let mut transport = Framed::new(stream, codec);
+    let mut transport = Framed::new(stream, NoiseMessageCodec::new());
 
-    let mut buf = vec![0u8; 65535];
-
-    let mut noise = initiator_handshake(&mut transport, static_key).await?;
+    let noise = initiator_handshake(&mut transport, static_key).await?;
+    transport.codec_mut().set_noise(noise);
 
     let cmd = Message {
         cmd: MessageType::Ping as u32,
-        payload: Bytes::copy_from_slice(b"Secret Message"),
+        payload: Bytes::copy_from_slice(b"Secret Ping"),
     };
-    let len = noise.write_message(&cmd.as_bytes(), &mut buf).unwrap();
-    let data = Bytes::copy_from_slice(&buf[..len]);
-    transport.send(data).await?;
-    println!("send the first secured message(PING)");
+    println!("Send msg: {:?}", cmd);
+    transport.send(cmd.as_bytes()).await?;
 
-    // secureline
     while let Some(request) = transport.next().await {
         match request {
             Ok(request) => {
                 let mut data = request.freeze();
-                println!("Got message(cyphertext): {:?}", data);
-                let len = noise.read_message(&data, &mut buf).unwrap();
-                data = Bytes::copy_from_slice(&buf[..len]);
-                println!("Got message(plaintext): {:?}", data);
-
                 let cmd = Message::new(&mut data);
                 println!("Got cmd: {:?}", cmd);
             }
