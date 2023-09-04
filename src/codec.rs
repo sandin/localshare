@@ -66,6 +66,7 @@ impl Decoder for NoiseMessageCodec {
                 // Decrypt messages first in encrypted transmission mode
                 if let Some(noise) = &mut self.noise {
                     let mut item = BytesMut::with_capacity(0);
+                    println!("Decode bytes: {:?}", src);
                     for chunk in src.chunks(self.decode_buffer.len()) {
                         match noise.read_message(&chunk, &mut self.decode_buffer) {
                             Ok(len) => {
@@ -74,6 +75,7 @@ impl Decoder for NoiseMessageCodec {
                                 println!("Decode plaintext: {:?}", item);
                             }
                             Err(e) => {
+                                println!("Decode error, {:?}, chunk: {:?}", e, Bytes::copy_from_slice(chunk));
                                 break;
                             }
                         }
@@ -100,6 +102,7 @@ impl Encoder<Bytes> for NoiseMessageCodec {
                     Ok(r) => {
                         if let Some(noise) = &mut self.noise {
                             let mut cyphertext = BytesMut::with_capacity(0);
+                            println!("Encode bytes: {:?}", dst);
                             for chunk in dst.chunks(self.encode_buffer.len()) {
                                 println!("Encode plaintext: {:?}", Bytes::copy_from_slice(chunk));
                                 let len = noise

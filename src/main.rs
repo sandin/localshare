@@ -1,15 +1,13 @@
 mod codec;
-mod file_chunk;
+mod commands;
 mod keyring;
 mod message;
 mod noise;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use clap::{arg, Command};
 use futures::SinkExt;
 use std::error::Error;
-use std::ffi::OsStr;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -17,7 +15,7 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
 use crate::codec::NoiseMessageCodec;
-use crate::file_chunk::split_file_to_chunks;
+use crate::commands::{handle_pull_request, handle_pull_response};
 use crate::keyring::{read_keypair_from_file, write_keypair_to_file};
 use crate::message::{Deserializable, FileHeader, Message, MessageType, PullRequest, Serializable};
 use crate::noise::{gen_keypair, initiator_handshake, responder_handshake};
@@ -136,63 +134,18 @@ async fn handle_client(
     transport.codec_mut().set_noise(noise);
 
     while let Some(request) = transport.next().await {
+        println!("==========================");
+        println!("Got request: {:?}", request);
         match request {
             Ok(request) => {
-                let mut data = request.freeze();
-                //let response = handle_request(&mut data).await?;
-                //transport.send(response).await?;
-
-                let mut msg = Message::deserialize(&mut data);
-                println!("Got cmd: {:?}", msg);
-
-                match MessageType::try_from(msg.cmd) {
-                    Ok(MessageType::Ping) => {
-                        let msg = Message {
-                            cmd: MessageType::Pong as u32,
-                            payload: Bytes::copy_from_slice(b"Secret Pong"),
-                        };
-                        println!("Send msg: {:?}", msg);
-                        transport.send(msg.serialize()).await?;
-                    }
-                    Ok(MessageType::Pull) => {
-                        let pull_request = PullRequest::deserialize(&mut msg.payload);
-                        let filepath = Path::new(&pull_request.filepath);
-                        if !filepath.exists() {
-                            let msg = Message {
-                                cmd: MessageType::Text as u32,
-                                payload: Bytes::from(format!(
-                                    "Error: {} file is not exists!",
-                                    filepath.to_str().unwrap()
-                                )),
-                            };
-                            println!("Send msg: {:?}", msg);
-                            transport.send(msg.serialize()).await?;
-                        }
-
-                        let msg = Message {
-                            cmd: MessageType::FileHeader as u32,
-                            payload: FileHeader::new(&filepath).serialize(),
-                        };
-                        println!("Send msg: {:?}", msg);
-                        transport.send(msg.serialize()).await?;
-
-                        let chunks = split_file_to_chunks(&filepath).unwrap();
-                        for chunk in chunks {
-                            let msg = Message {
-                                cmd: MessageType::FileChunk as u32,
-                                payload: Bytes::from("chunk"), // TODO: chunk.serialize(),
-                            };
-                            println!("Send msg: {:?}", msg);
-                            transport.send(msg.serialize()).await?;
-                        }
-                    }
-                    Ok(MessageType::Push) => {
-                        // TODO
-                    }
-                    _ => {
-                        println!("unknown cmd: {}", msg.cmd);
+                match handle_request(&mut transport, request).await {
+                    Ok(_) => {
+                        // continue
+                    },
+                    Err(e) => {
+                        println!("{:?}", e);
                         break; // close this connection
-                    }
+                    },
                 }
             }
             Err(e) => return Err(e.into()),
@@ -202,47 +155,36 @@ async fn handle_client(
     Ok(())
 }
 
-async fn handle_request(data: &mut Bytes) -> Result<Bytes, Box<dyn Error>> {
-    let mut msg = Message::deserialize(data);
-    println!("Got cmd: {:?}", msg);
+async fn handle_request(transport: &mut Framed<TcpStream, NoiseMessageCodec>, request: BytesMut) -> Result<(), Box<dyn Error>> {
+    let mut data = request.freeze();
+    //let response = handle_request(&mut data).await?;
+    //transport.send(response).await?;
+
+    let mut msg = Message::deserialize(&mut data);
+    println!("<- : {}", msg);
 
     match MessageType::try_from(msg.cmd) {
         Ok(MessageType::Ping) => {
-            let resp = Message {
+            let msg = Message {
                 cmd: MessageType::Pong as u32,
                 payload: Bytes::copy_from_slice(b"Secret Pong"),
             };
-            println!("Send msg: {:?}", resp);
-            return Ok(resp.serialize());
+            println!("Send msg: {}", msg);
+            transport.send(msg.serialize()).await?;
         }
         Ok(MessageType::Pull) => {
             let pull_request = PullRequest::deserialize(&mut msg.payload);
-            let filepath = Path::new(&pull_request.filepath);
-            if !filepath.exists() {
-                return Ok(Message {
-                    cmd: MessageType::Text as u32,
-                    payload: Bytes::from(format!(
-                        "Error: {} file is not exists!",
-                        filepath.to_str().unwrap()
-                    )),
-                }
-                .serialize());
-            }
-
-            return Ok(Message {
-                cmd: MessageType::FileHeader as u32,
-                payload: FileHeader::new(filepath).serialize(),
-            }
-            .serialize());
+            return handle_pull_request(transport, pull_request).await;
         }
         Ok(MessageType::Push) => {
             // TODO
         }
         _ => {
-            println!("unknown cmd: {}", msg.cmd);
+            return Err(Box::from(format!("unknown cmd: {}", msg.cmd)));
         }
     }
-    Ok(Bytes::new())
+
+    Ok(())
 }
 
 async fn pull_file(
@@ -263,24 +205,10 @@ async fn pull_file(
         cmd: MessageType::Pull as u32,
         payload: PullRequest::new(filepath).serialize(),
     };
-    println!("Send msg: {:?}", cmd);
+    println!("-> : {}", cmd);
     transport.send(cmd.serialize()).await?;
 
-    while let Some(request) = transport.next().await {
-        match request {
-            Ok(request) => {
-                let mut data = request.freeze();
-                let mut msg = Message::deserialize(&mut data);
-                println!("Got msg: {:?}", msg);
-                if msg.cmd == MessageType::FileHeader as u32 {
-                    let file_header = FileHeader::deserialize(&mut msg.payload);
-                    println!("file_header: {:?}", file_header);
-                    // TODO
-                }
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
+    handle_pull_response(&mut transport).await?;
 
     Ok(())
 }

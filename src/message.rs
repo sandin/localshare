@@ -1,11 +1,9 @@
-use crate::file_chunk::cal_file_checksum;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
-use std::mem::size_of;
-use std::path::Path;
+use std::{mem::size_of, fmt::Display};
 
-#[derive(TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(u32)]
 pub enum MessageType {
     Handshake = 1,
@@ -14,9 +12,25 @@ pub enum MessageType {
     Pong = 4,
     Push = 5,
     Pull = 6,
-    Text = 7,
+    PlainText = 7,
     FileHeader = 8,
     FileChunk = 9,
+}
+
+impl Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageType::Handshake => write!(f, "Handshake"),
+            MessageType::Handshake1 => write!(f, "Handshake1"),
+            MessageType::Ping => write!(f, "Ping"),
+            MessageType::Pong => write!(f, "Pong"),
+            MessageType::Push => write!(f, "Push"),
+            MessageType::Pull => write!(f, "Pull"),
+            MessageType::PlainText => write!(f, "PlainText"),
+            MessageType::FileHeader => write!(f, "FileHeader"),
+            MessageType::FileChunk => write!(f, "FileChunk"),
+        }
+    }
 }
 
 /// Serializable (struct -> Bytes)
@@ -35,6 +49,12 @@ pub trait Deserializable<T> {
 pub struct Message {
     pub cmd: u32,
     pub payload: Bytes,
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Message {{ cmd: {}, payload: {:?} }}", MessageType::try_from(self.cmd).unwrap(), self.payload)
+    }
 }
 
 impl Serializable for Message {
@@ -97,21 +117,6 @@ pub struct FileHeader {
     pub filename: String,
     pub checksum: String,
     pub filesize: u64,
-}
-
-impl FileHeader {
-    pub fn new(filepath: &Path) -> Self {
-        FileHeader {
-            filename: filepath
-                .file_name()
-                .unwrap()
-                .to_os_string()
-                .into_string()
-                .unwrap(),
-            checksum: cal_file_checksum(filepath).unwrap(),
-            filesize: filepath.metadata().unwrap().len(),
-        }
-    }
 }
 
 impl Serializable for FileHeader {

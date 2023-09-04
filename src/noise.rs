@@ -47,7 +47,7 @@ pub async fn responder_handshake(
         let mut data = request.freeze();
         let msg = Message::deserialize(&mut data);
         if msg.cmd == MessageType::Handshake as u32 {
-            println!("<- e: {:?}", msg.payload);
+            println!("<- e: {}", msg);
             handshake.read_message(&msg.payload, &mut buf)?;
 
             let len = handshake.write_message(&[], &mut buf).unwrap();
@@ -56,9 +56,9 @@ pub async fn responder_handshake(
                 payload: Bytes::copy_from_slice(&buf[..len]),
             };
             transport.send(cmd.serialize()).await?;
-            println!("-> e, ee, s, es: {:?}", cmd.payload);
+            println!("-> e, ee, s, es: {}", cmd);
         } else if msg.cmd == MessageType::Handshake1 as u32 {
-            println!("<- s, se: {:?}", msg.payload);
+            println!("<- s, se: {}", msg);
             handshake.read_message(&msg.payload, &mut buf)?;
 
             let s = serialize_key(handshake.get_remote_static().unwrap());
@@ -88,7 +88,7 @@ pub async fn initiator_handshake(
         payload: Bytes::copy_from_slice(&buf[..len]),
     };
     transport.send(cmd.serialize()).await.unwrap();
-    println!("-> e: {:?}", cmd.payload);
+    println!("-> e: {}", cmd);
 
     let noise;
     loop {
@@ -101,7 +101,7 @@ pub async fn initiator_handshake(
         let mut data = request.freeze();
         let cmd = Message::deserialize(&mut data);
         if cmd.cmd == MessageType::Handshake as u32 {
-            println!("<- e, ee, s, es: {:?}", cmd.payload);
+            println!("<- e, ee, s, es: {}", cmd);
             handshake.read_message(&cmd.payload, &mut buf)?;
 
             let s = serialize_key(handshake.get_remote_static().unwrap());
@@ -113,7 +113,7 @@ pub async fn initiator_handshake(
                 payload: Bytes::copy_from_slice(&buf[..len]),
             };
             transport.send(cmd.serialize()).await?;
-            println!("-> s, se: {:?}", cmd.payload);
+            println!("-> s, se: {}", cmd);
         }
     }
 
