@@ -36,7 +36,7 @@ pub fn read_keypair_from_file(filename: &PathBuf) -> Result<Keypair, Box<dyn Err
     for line in lines {
         if line.starts_with("PublicKey = ") {
             let key = &line["PublicKey = ".len()..];
-            println!("PublicKey = {}", key);
+            println!("PublicKey: {}", key);
             public_key = Some(Base64::decode_vec(key).unwrap());
         } else if line.starts_with("PrivateKey = ") {
             private_key = Some(Base64::decode_vec(&line["PrivateKey = ".len()..]).unwrap());

@@ -3,9 +3,11 @@ use bytes::{Bytes, BytesMut};
 use futures::SinkExt;
 use std::error::Error;
 use std::fs::File;
+use std::fs::remove_file;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::Path;
+use std::path::PathBuf;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
@@ -18,18 +20,20 @@ pub fn cal_file_checksum(filepath: &Path) -> Result<String, Box<dyn Error>> {
     let mut reader = BufReader::new(f);
     let mut hasher = Blake2s256::new();
 
-    let mut buffer = [0u8; 65535];
+    let mut buf = [0u8; 65535];
     loop {
-        let n = reader.read(&mut buffer[..])?;
+        let n = reader.read(&mut buf[..])?;
         if n == 0 {
             break; // EOF
         }
-        hasher.update(&buffer[..n]);
+        hasher.update(&buf[..n]);
     }
     let res = hasher.finalize();
     Ok(hex::encode(&res))
 }
 
+
+// [server]
 pub async fn handle_pull_request(
     transport: &mut Framed<TcpStream, NoiseMessageCodec>,
     pull_request: PullRequest,
@@ -47,7 +51,7 @@ pub async fn handle_pull_request(
         println!("-> : {}", msg);
     }
 
-    // send file header
+    // send the file header
     let file_header = FileHeader {
         filename: filepath
             .file_name()
@@ -63,16 +67,35 @@ pub async fn handle_pull_request(
         payload: file_header.serialize(),
     };
     transport.send(msg.serialize()).await?;
-    println!("-> : {}", msg);
+
+    // send file chunks
+    let f = File::open(filepath).unwrap();
+    let mut reader = BufReader::new(f);
+    let mut buf = [0u8; 65535];
+    loop {
+        let n = reader.read(&mut buf[..])?;
+        if n == 0 {
+            break; // EOF
+        }
+        let msg = Message {
+            cmd: MessageType::FileChunk as u32,
+            payload: Bytes::copy_from_slice(&buf[..n]),
+        };
+        println!("Send msg: {:?}", msg);
+        transport.send(msg.serialize()).await?;
+        println!("-> : {}", msg);
+    }
 
     Ok(())
 }
 
+// [client]
 pub async fn handle_pull_response(
     transport: &mut Framed<TcpStream, NoiseMessageCodec>,
 ) -> Result<(), Box<dyn Error>> {
     let mut file_header: Option<FileHeader> = None;
     let mut f: Option<File> = None;
+    let mut local_file_path: Option<PathBuf> = None;
     let mut recv_count = 0;
 
     while let Some(request) = transport.next().await {
@@ -83,7 +106,10 @@ pub async fn handle_pull_response(
                 println!("<- : {}", msg);
                 if msg.cmd == MessageType::FileHeader as u32 {
                     let header = FileHeader::deserialize(&mut msg.payload);
-                    f = Some(File::create(&header.filename)?);
+                    let mut file_path = PathBuf::new();
+                    file_path.push(&header.filename); // TODO: dir
+                    f = Some(File::create(&file_path)?);
+                    local_file_path = Some(file_path);
                     file_header = Some(header);
                 } else if msg.cmd == MessageType::FileChunk as u32 {
                     if let Some(file_header) = &file_header {
@@ -92,6 +118,13 @@ pub async fn handle_pull_response(
                             recv_count += msg.payload.len();
 
                             if recv_count >= file_header.filesize as usize {
+                                if let Some(local_file_path) = &local_file_path {
+                                    let checksum = cal_file_checksum(local_file_path)?;
+                                    if checksum != file_header.checksum {
+                                        println!("mismatch checksum");
+                                        remove_file(local_file_path)?;
+                                    }
+                                }
                                 break;
                             }
                         }

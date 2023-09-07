@@ -63,26 +63,33 @@ impl Decoder for NoiseMessageCodec {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self.state {
             DecodeState::Cyphertext => {
-                // Decrypt messages first in encrypted transmission mode
+                // Decode(|head|payload|) -> Decrypt(payload)
                 if let Some(noise) = &mut self.noise {
-                    let mut item = BytesMut::with_capacity(0);
-                    println!("Decode bytes: {:?}", src);
-                    for chunk in src.chunks(self.decode_buffer.len()) {
-                        match noise.read_message(&chunk, &mut self.decode_buffer) {
-                            Ok(len) => {
-                                println!("Decode cyphertext: {:?}", Bytes::copy_from_slice(chunk));
-                                item.extend_from_slice(&self.decode_buffer[..len]);
-                                println!("Decode plaintext: {:?}", item);
+                    match self.inner.decode(src)? {
+                        Some(data) => {
+                            let mut item = BytesMut::with_capacity(0);
+                            println!("Decode bytes: {:?}", data);
+                            for chunk in data.chunks(self.decode_buffer.len()) {
+                                match noise.read_message(&chunk, &mut self.decode_buffer) {
+                                    Ok(len) => {
+                                        println!("Decode cyphertext: {:?}", Bytes::copy_from_slice(chunk));
+                                        item.extend_from_slice(&self.decode_buffer[..len]);
+                                        println!("Decode plaintext: {:?}", item);
+                                    }
+                                    Err(e) => {
+                                        println!("Decode error, {:?}, chunk: {:?}", e, Bytes::copy_from_slice(chunk));
+                                        break;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                println!("Decode error, {:?}, chunk: {:?}", e, Bytes::copy_from_slice(chunk));
-                                break;
-                            }
+                            Ok(Some(item))
+                        }
+                        None => {
+                            Ok(None)
                         }
                     }
-                    return self.inner.decode(&mut item);
                 } else {
-                    return self.inner.decode(src);
+                    return self.inner.decode(src); // TODO: Err
                 }
             }
             DecodeState::Plaintext => {
@@ -98,28 +105,21 @@ impl Encoder<Bytes> for NoiseMessageCodec {
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
         match self.state {
             DecodeState::Cyphertext => {
-                match self.inner.encode(item, dst) {
-                    Ok(r) => {
-                        if let Some(noise) = &mut self.noise {
-                            let mut cyphertext = BytesMut::with_capacity(0);
-                            println!("Encode bytes: {:?}", dst);
-                            for chunk in dst.chunks(self.encode_buffer.len()) {
-                                println!("Encode plaintext: {:?}", Bytes::copy_from_slice(chunk));
-                                let len = noise
-                                    .write_message(&chunk, &mut self.encode_buffer)
-                                    .unwrap();
-                                cyphertext.extend_from_slice(&self.encode_buffer[..len]);
-                                println!("Encode cyphertext: {:?}", cyphertext);
-                            }
-
-                            unsafe {
-                                dst.set_len(cyphertext.len());
-                            } // TODO: unsafe?
-                            dst.copy_from_slice(&cyphertext);
-                        }
-                        Ok(r)
+                // Encrypt(payload) -> Encode(|head|payload|)
+                if let Some(noise) = &mut self.noise {
+                    let mut cyphertext = BytesMut::with_capacity(0);
+                    println!("Encode bytes: {:?}", item);
+                    for chunk in item.chunks(self.encode_buffer.len()) {
+                        println!("Encode plaintext: {:?}", Bytes::copy_from_slice(chunk));
+                        let len = noise
+                            .write_message(&chunk, &mut self.encode_buffer)
+                            .unwrap();
+                        cyphertext.extend_from_slice(&self.encode_buffer[..len]);
+                        println!("Encode cyphertext: {:?}", cyphertext);
                     }
-                    Err(e) => Err(e),
+                    return self.inner.encode(cyphertext.freeze(), dst);
+                } else {
+                    return self.inner.encode(item, dst); // TODO: Err
                 }
             }
             DecodeState::Plaintext => {
