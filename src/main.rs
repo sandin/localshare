@@ -22,6 +22,7 @@ use crate::noise::{gen_keypair, initiator_handshake, responder_handshake};
 
 struct Context {
     keypair: snow::Keypair,
+    root_dir: String,
 }
 
 #[tokio::main]
@@ -41,6 +42,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     arg!(-k --key <FILE> "the keyring file")
                         .value_parser(clap::value_parser!(std::path::PathBuf))
                         .required(true),
+                )
+                .arg(
+                    arg!(-d --dir <DIR> "the root dir")
+                        .required(false),
                 )
                 .arg_required_else_help(true),
         )
@@ -72,7 +77,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let keyfile = matches
                 .get_one::<std::path::PathBuf>("key")
                 .expect("required");
-            start_server(addr, keyfile).await?;
+            let default_root_dir = "/".to_owned();
+            let root_dir = matches.get_one::<String>("dir").unwrap_or(&default_root_dir);
+            start_server(addr, keyfile, root_dir.to_string()).await?;
         }
         Some(("pull", matches)) => {
             let filepath = matches.get_one::<String>("PATH").expect("required");
@@ -103,9 +110,9 @@ async fn gen_keyring_file(output: &std::path::PathBuf) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-async fn start_server(addr: &String, keyfile: &std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+async fn start_server(addr: &String, keyfile: &std::path::PathBuf, root_dir: String) -> Result<(), Box<dyn Error>> {
     let keypair = read_keypair_from_file(keyfile)?;
-    let context = Arc::new(Mutex::new(Context { keypair }));
+    let context = Arc::new(Mutex::new(Context { keypair, root_dir }));
 
     let server = TcpListener::bind(&addr).await?;
     println!("Listening on: {}", addr);
@@ -138,7 +145,7 @@ async fn handle_client(
         println!("Got request: {:?}", request);
         match request {
             Ok(request) => {
-                match handle_request(&mut transport, request).await {
+                match handle_request(&context, &mut transport, request).await {
                     Ok(_) => {
                         // continue
                     },
@@ -155,7 +162,7 @@ async fn handle_client(
     Ok(())
 }
 
-async fn handle_request(transport: &mut Framed<TcpStream, NoiseMessageCodec>, request: BytesMut) -> Result<(), Box<dyn Error>> {
+async fn handle_request(context: &Context, transport: &mut Framed<TcpStream, NoiseMessageCodec>, request: BytesMut) -> Result<(), Box<dyn Error>> {
     let mut data = request.freeze();
     //let response = handle_request(&mut data).await?;
     //transport.send(response).await?;
@@ -174,7 +181,7 @@ async fn handle_request(transport: &mut Framed<TcpStream, NoiseMessageCodec>, re
         }
         Ok(MessageType::Pull) => {
             let pull_request = PullRequest::deserialize(&mut msg.payload);
-            return handle_pull_request(transport, pull_request).await;
+            return handle_pull_request(&context.root_dir, transport, pull_request).await;
         }
         Ok(MessageType::Push) => {
             // TODO

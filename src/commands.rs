@@ -35,11 +35,13 @@ pub fn cal_file_checksum(filepath: &Path) -> Result<String, Box<dyn Error>> {
 
 // [server]
 pub async fn handle_pull_request(
+    root_dir: &String,
     transport: &mut Framed<TcpStream, NoiseMessageCodec>,
     pull_request: PullRequest,
 ) -> Result<(), Box<dyn Error>> {
     let filepath = Path::new(&pull_request.filepath);
-    if !filepath.exists() {
+    println!("filepath: {:?}, root_dir: {:?}", &filepath, &root_dir);
+    if !filepath.exists() || !filepath.starts_with(root_dir) {
         let msg = Message {
             cmd: MessageType::PlainText as u32,
             payload: Bytes::from(format!(
@@ -49,6 +51,8 @@ pub async fn handle_pull_request(
         };
         transport.send(msg.serialize()).await?;
         println!("<- : {}", msg);
+
+        return Ok(()); // TODO: return Err(&"Error".to_owned());
     }
 
     // send the file header
@@ -130,6 +134,8 @@ pub async fn handle_pull_response(
                             }
                         }
                     }
+                } else {
+                    break;
                 }
             }
             Err(e) => {
