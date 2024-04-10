@@ -161,7 +161,7 @@ async fn handle_request(transport: &mut Framed<TcpStream, NoiseMessageCodec>, re
     //transport.send(response).await?;
 
     let mut msg = Message::deserialize(&mut data);
-    println!("<- : {}", msg);
+    println!("-> : {}", msg);
 
     match MessageType::try_from(msg.cmd) {
         Ok(MessageType::Ping) => {
@@ -205,7 +205,7 @@ async fn pull_file(
         cmd: MessageType::Pull as u32,
         payload: PullRequest::new(filepath).serialize(),
     };
-    println!("-> : {}", cmd);
+    println!("<- : {}", cmd);
     transport.send(cmd.serialize()).await?;
 
     handle_pull_response(&mut transport).await?;

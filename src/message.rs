@@ -53,7 +53,7 @@ pub struct Message {
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Message {{ cmd: {}, payload: {:?} }}", MessageType::try_from(self.cmd).unwrap(), self.payload)
+        write!(f, "Message {{ cmd: {}, payload: {:?}...(len={:?}) }}", MessageType::try_from(self.cmd).unwrap(), self.payload.slice(0..10), self.payload.len())
     }
 }
 

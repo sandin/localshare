@@ -48,7 +48,7 @@ pub async fn handle_pull_request(
             )),
         };
         transport.send(msg.serialize()).await?;
-        println!("-> : {}", msg);
+        println!("<- : {}", msg);
     }
 
     // send the file header
@@ -67,6 +67,7 @@ pub async fn handle_pull_request(
         payload: file_header.serialize(),
     };
     transport.send(msg.serialize()).await?;
+    println!("<- : {}", msg);
 
     // send file chunks
     let f = File::open(filepath).unwrap();
@@ -81,10 +82,10 @@ pub async fn handle_pull_request(
             cmd: MessageType::FileChunk as u32,
             payload: Bytes::copy_from_slice(&buf[..n]),
         };
-        println!("Send msg: {:?}", msg);
         transport.send(msg.serialize()).await?;
-        println!("-> : {}", msg);
+        println!("<- : {}", msg);
     }
+    println!("Send file {:?}, size: {:?}, checksum: {:?}", &file_header.filename, &file_header.filesize, &file_header.checksum);
 
     Ok(())
 }
@@ -103,7 +104,7 @@ pub async fn handle_pull_response(
             Ok(request) => {
                 let mut data = request.freeze();
                 let mut msg = Message::deserialize(&mut data);
-                println!("<- : {}", msg);
+                println!("-> : {}", msg);
                 if msg.cmd == MessageType::FileHeader as u32 {
                     let header = FileHeader::deserialize(&mut msg.payload);
                     let mut file_path = PathBuf::new();
@@ -131,12 +132,21 @@ pub async fn handle_pull_response(
                     }
                 }
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(e.into());
+            },
         }
     }
 
     if let Some(file_header) = &file_header {
-        println!("Got file {}, size {}", file_header.filename, file_header.filesize)
+        if recv_count == file_header.filesize as usize {
+            println!("Got file {:?}, size: {:?}, checksum: {:?}", &file_header.filename, &file_header.filesize, &file_header.checksum);
+        } else {
+            println!("Can not get the file {}, expect file size {}, actual revc size {}", file_header.filename, file_header.filesize, recv_count);
+            if let Some(local_file_path) = &local_file_path {
+                remove_file(local_file_path)?;
+            }
+        }
     }
     Ok(())
 }

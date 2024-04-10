@@ -3,6 +3,8 @@ use snow::TransportState;
 use std::io;
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
+const SNOW_TAGLEN: usize = 16;
+
 // The state of decode
 #[derive(Debug, Clone, Copy)]
 enum DecodeState {
@@ -68,16 +70,16 @@ impl Decoder for NoiseMessageCodec {
                     match self.inner.decode(src)? {
                         Some(data) => {
                             let mut item = BytesMut::with_capacity(0);
-                            println!("Decode bytes: {:?}", data);
+                            //println!("Decode bytes: {:?}", data);
                             for chunk in data.chunks(self.decode_buffer.len()) {
                                 match noise.read_message(&chunk, &mut self.decode_buffer) {
                                     Ok(len) => {
-                                        println!("Decode cyphertext: {:?}", Bytes::copy_from_slice(chunk));
+                                        //println!("Decode cyphertext: {:?}", Bytes::copy_from_slice(chunk));
                                         item.extend_from_slice(&self.decode_buffer[..len]);
-                                        println!("Decode plaintext: {:?}", item);
+                                        //println!("Decode plaintext: {:?}", Bytes::copy_from_slice(&self.decode_buffer[..len]));
                                     }
                                     Err(e) => {
-                                        println!("Decode error, {:?}, chunk: {:?}", e, Bytes::copy_from_slice(chunk));
+                                        println!("Decode error, {:?}, chunk: {:?}", e, Bytes::copy_from_slice(chunk).len());
                                         break;
                                     }
                                 }
@@ -108,14 +110,19 @@ impl Encoder<Bytes> for NoiseMessageCodec {
                 // Encrypt(payload) -> Encode(|head|payload|)
                 if let Some(noise) = &mut self.noise {
                     let mut cyphertext = BytesMut::with_capacity(0);
-                    println!("Encode bytes: {:?}", item);
-                    for chunk in item.chunks(self.encode_buffer.len()) {
-                        println!("Encode plaintext: {:?}", Bytes::copy_from_slice(chunk));
-                        let len = noise
-                            .write_message(&chunk, &mut self.encode_buffer)
-                            .unwrap();
-                        cyphertext.extend_from_slice(&self.encode_buffer[..len]);
-                        println!("Encode cyphertext: {:?}", cyphertext);
+                    //println!("Encode bytes: {:?}", item.len());
+                    for chunk in item.chunks(self.encode_buffer.len() - SNOW_TAGLEN) {
+                        match noise.write_message(&chunk, &mut self.encode_buffer) {
+                            Ok(len) => {
+                                //println!("Encode plaintext: {:?}", Bytes::copy_from_slice(chunk));
+                                cyphertext.extend_from_slice(&self.encode_buffer[..len]);
+                                //println!("Encode cyphertext: len={}", len);
+                            }
+                            Err(e) => {
+                                println!("Encode error, {:?}, chunk: {:?}", e, chunk.len());
+                                break;
+                            }
+                        }
                     }
                     return self.inner.encode(cyphertext.freeze(), dst);
                 } else {
