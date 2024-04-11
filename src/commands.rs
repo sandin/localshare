@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
+use std::time::SystemTime;
 
 use crate::codec::NoiseMessageCodec;
 use crate::message::{Deserializable, FileHeader, Message, MessageType, PullRequest, Serializable};
@@ -102,6 +103,8 @@ pub async fn handle_pull_response(
     let mut f: Option<File> = None;
     let mut local_file_path: Option<PathBuf> = None;
     let mut recv_count = 0;
+    let mut error_msg: Option<String> = None;
+    let start_time = SystemTime::now();
 
     while let Some(request) = transport.next().await {
         match request {
@@ -134,6 +137,9 @@ pub async fn handle_pull_response(
                             }
                         }
                     }
+                } else if msg.cmd == MessageType::PlainText as u32 {
+                    error_msg = Some(String::from_utf8_lossy(&msg.payload).to_string());
+                    break;
                 } else {
                     break;
                 }
@@ -143,17 +149,27 @@ pub async fn handle_pull_response(
             },
         }
     }
+    let cost_sec = start_time.elapsed().unwrap().as_secs_f64();
+    let speed_kb_pre_sec = if recv_count != 0 && cost_sec != 0.0 { recv_count as f64 / 1024.0 / cost_sec } else { 0.0 };
 
-    if let Some(file_header) = &file_header {
-        if recv_count == file_header.filesize as usize {
-            println!("Got file {:?}, size: {:?}, checksum: {:?}", &file_header.filename, &file_header.filesize, &file_header.checksum);
-        } else {
-            println!("Can not get the file {}, expect file size {}, actual revc size {}", file_header.filename, file_header.filesize, recv_count);
-            if let Some(local_file_path) = &local_file_path {
-                remove_file(local_file_path)?;
+    match error_msg {
+        Some(error_msg) => {
+            println!("Error message: {:?}", error_msg);
+        },
+        None => {
+            if let Some(file_header) = &file_header {
+                if recv_count == file_header.filesize as usize {
+                    println!("Got file {:?}, size: {:?}, checksum: {:?}, speed: {:?} kb/s", &file_header.filename, &file_header.filesize, &file_header.checksum, speed_kb_pre_sec);
+                } else {
+                    println!("Can not get the file {}, expect file size {}, actual revc size {}", file_header.filename, file_header.filesize, recv_count);
+                    if let Some(local_file_path) = &local_file_path {
+                        remove_file(local_file_path)?;
+                    }
+                }
             }
         }
     }
+  
     Ok(())
 }
 
