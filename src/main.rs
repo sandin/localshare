@@ -3,10 +3,12 @@ mod commands;
 mod keyring;
 mod message;
 mod noise;
+mod error;
 
 use bytes::{Bytes, BytesMut};
 use clap::{arg, Command};
 use futures::SinkExt;
+use keyring::read_authorized_keys_from_file;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -22,6 +24,7 @@ use crate::noise::{gen_keypair, initiator_handshake, responder_handshake};
 
 struct Context {
     keypair: snow::Keypair,
+    authorized_keys_file: Option<std::path::PathBuf>,
     root_dir: String,
 }
 
@@ -40,6 +43,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
                 .arg(
                     arg!(-k --key <FILE> "the keyring file")
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .required(false),
+                )
+                .arg(
+                    arg!(-a --authorized_keys <FILE> "the authorized keys file")
                         .value_parser(clap::value_parser!(std::path::PathBuf))
                         .required(false),
                 )
@@ -74,11 +82,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match matches.subcommand() {
         Some(("server", matches)) => {
             let addr = matches.get_one::<String>("ADDR").expect("required");
-            let keyfile = matches
-                .get_one::<std::path::PathBuf>("key");
+            let keyfile = matches.get_one::<std::path::PathBuf>("key");
+            let authorized_keys_file = matches.get_one::<std::path::PathBuf>("authorized_keys");
             let default_root_dir = "/".to_owned();
             let root_dir = matches.get_one::<String>("dir").unwrap_or(&default_root_dir);
-            start_server(addr, keyfile, root_dir.to_string()).await?;
+            start_server(addr, keyfile, authorized_keys_file, root_dir.to_string()).await?;
         }
         Some(("pull", matches)) => {
             let filepath = matches.get_one::<String>("PATH").expect("required");
@@ -108,12 +116,16 @@ async fn gen_keyring_file(output: &std::path::PathBuf) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-async fn start_server(addr: &String, keyfile: Option<&std::path::PathBuf>, root_dir: String) -> Result<(), Box<dyn Error>> {
+async fn start_server(addr: &String, keyfile: Option<&std::path::PathBuf>, authorized_keys_file: Option<&std::path::PathBuf>, root_dir: String) -> Result<(), Box<dyn Error>> {
     let keypair = match keyfile {
         Some(keyfile) => read_keypair_from_file(keyfile)?,
         None => gen_keypair()?
     }; 
-    let context = Arc::new(Mutex::new(Context { keypair, root_dir }));
+    let authorized_keys_file: Option<std::path::PathBuf> = match authorized_keys_file {
+        Some(authorized_keys_file) => Some(authorized_keys_file.clone()),
+        None => None,
+    };
+    let context = Arc::new(Mutex::new(Context { keypair, authorized_keys_file, root_dir }));
 
     let server = TcpListener::bind(&addr).await?;
     println!("Listening on: {}", addr);
@@ -138,7 +150,11 @@ async fn handle_client(
     let static_key = &context.keypair.private;
 
     let mut transport = Framed::new(stream, NoiseMessageCodec::new());
-    let noise = responder_handshake(&mut transport, static_key).await?;
+    let authorized_keys = match &context.authorized_keys_file {
+        Some(authorized_keys_file) => read_authorized_keys_from_file(&authorized_keys_file).unwrap(),
+        None => Vec::new()
+    };
+    let noise = responder_handshake(&mut transport, static_key, &authorized_keys).await?;
     transport.codec_mut().set_noise(noise);
 
     while let Some(request) = transport.next().await {

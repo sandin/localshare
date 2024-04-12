@@ -51,3 +51,19 @@ pub fn read_keypair_from_file(filename: &PathBuf) -> Result<Keypair, Box<dyn Err
         public: public_key.unwrap().clone(),
     })
 }
+
+
+pub fn read_authorized_keys_from_file(filename: &PathBuf) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut keys = Vec::new();
+    if filename.exists() {
+        let mut file = File::open(filename)?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+
+        let lines = content.split('\n');
+        for line in lines {
+            keys.push(line.trim().to_string());
+        }
+    }
+    Ok(keys)
+} 

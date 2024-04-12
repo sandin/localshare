@@ -9,6 +9,7 @@ use tokio_util::codec::Framed;
 
 use crate::codec::NoiseMessageCodec;
 use crate::keyring::serialize_key;
+use crate::error::AuthError;
 use crate::message::{Deserializable, Message, MessageType, Serializable};
 
 static SECRET: &[u8] = &[
@@ -27,6 +28,7 @@ pub fn gen_keypair() -> Result<Keypair, Box<dyn Error>> {
 pub async fn responder_handshake(
     transport: &mut Framed<TcpStream, NoiseMessageCodec>,
     static_key: &Vec<u8>,
+    authorized_keys: &Vec<String>
 ) -> Result<TransportState, Box<dyn Error>> {
     let builder: snow::Builder<'_> = snow::Builder::new(PARAMS.clone());
     let mut handshake = builder
@@ -35,11 +37,16 @@ pub async fn responder_handshake(
         .build_responder()
         .unwrap();
 
+    let mut authorized = false;
     let mut buf = vec![0u8; 65535];
     let noise;
     loop {
         if handshake.is_handshake_finished() {
             println!("handshake complete");
+            if !authorized {
+                return Err(Box::new(AuthError{msg:"Unauthorized".to_string()}));
+            }
+
             noise = handshake.into_transport_mode().unwrap();
             break;
         }
@@ -61,8 +68,15 @@ pub async fn responder_handshake(
             println!("<- s, se: {}", msg);
             handshake.read_message(&msg.payload, &mut buf)?;
 
-            let s = serialize_key(handshake.get_remote_static().unwrap());
-            println!("remote static key: {}", s);
+            let remote_pub_key = serialize_key(handshake.get_remote_static().unwrap());
+            println!("remote public key: {}", remote_pub_key);
+            authorized = authorized_keys.contains(&remote_pub_key);
+            let msg = Message {
+                cmd: MessageType::Handshake1 as u32,
+                payload: Bytes::from(format!("{}", if authorized { "Authorized" } else { "Unauthorized" }))
+            };
+            transport.send(msg.serialize()).await?;
+            println!("-> : {}", msg);
         }
     }
 
@@ -91,8 +105,9 @@ pub async fn initiator_handshake(
     println!("-> e: {}", cmd);
 
     let noise;
+    let mut got_auth_token = false;
     loop {
-        if handshake.is_handshake_finished() {
+        if handshake.is_handshake_finished() && got_auth_token {
             println!("handshake complete");
             noise = handshake.into_transport_mode().unwrap();
             break;
@@ -105,7 +120,7 @@ pub async fn initiator_handshake(
             handshake.read_message(&cmd.payload, &mut buf)?;
 
             let s = serialize_key(handshake.get_remote_static().unwrap());
-            println!("remote static key: {}", s);
+            println!("remote public key: {}", s);
 
             let len = handshake.write_message(&[], &mut buf).unwrap();
             let cmd = Message {
@@ -114,6 +129,13 @@ pub async fn initiator_handshake(
             };
             transport.send(cmd.serialize()).await?;
             println!("-> s, se: {}", cmd);
+        } else if cmd.cmd == MessageType::Handshake1 as u32 {
+            println!("<- : {}", cmd);
+            let auth_token = String::from_utf8_lossy(&cmd.payload).to_string();
+            if auth_token != "Authorized" {
+                return Err(Box::new(AuthError{msg:"Unauthorized".to_string()}));
+            } 
+            got_auth_token = true;
         }
     }
 
