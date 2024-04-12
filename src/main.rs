@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .arg(
                     arg!(-k --key <FILE> "the keyring file")
                         .value_parser(clap::value_parser!(std::path::PathBuf))
-                        .required(true),
+                        .required(false),
                 )
                 .arg(
                     arg!(-d --dir <DIR> "the root dir")
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .arg(
                     arg!(-k --key <FILE> "the keyring file")
                         .value_parser(clap::value_parser!(std::path::PathBuf))
-                        .required(true),
+                        .required(false),
                 )
                 .arg_required_else_help(true),
         )
@@ -75,8 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(("server", matches)) => {
             let addr = matches.get_one::<String>("ADDR").expect("required");
             let keyfile = matches
-                .get_one::<std::path::PathBuf>("key")
-                .expect("required");
+                .get_one::<std::path::PathBuf>("key");
             let default_root_dir = "/".to_owned();
             let root_dir = matches.get_one::<String>("dir").unwrap_or(&default_root_dir);
             start_server(addr, keyfile, root_dir.to_string()).await?;
@@ -85,8 +84,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let filepath = matches.get_one::<String>("PATH").expect("required");
             let addr = matches.get_one::<String>("peer").expect("required");
             let keyfile = matches
-                .get_one::<std::path::PathBuf>("key")
-                .expect("required");
+                .get_one::<std::path::PathBuf>("key");
             pull_file(filepath.clone(), addr, keyfile).await?;
         }
         Some(("keygen", matches)) => {
@@ -110,8 +108,11 @@ async fn gen_keyring_file(output: &std::path::PathBuf) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-async fn start_server(addr: &String, keyfile: &std::path::PathBuf, root_dir: String) -> Result<(), Box<dyn Error>> {
-    let keypair = read_keypair_from_file(keyfile)?;
+async fn start_server(addr: &String, keyfile: Option<&std::path::PathBuf>, root_dir: String) -> Result<(), Box<dyn Error>> {
+    let keypair = match keyfile {
+        Some(keyfile) => read_keypair_from_file(keyfile)?,
+        None => gen_keypair()?
+    }; 
     let context = Arc::new(Mutex::new(Context { keypair, root_dir }));
 
     let server = TcpListener::bind(&addr).await?;
@@ -197,9 +198,12 @@ async fn handle_request(context: &Context, transport: &mut Framed<TcpStream, Noi
 async fn pull_file(
     filepath: String,
     addr: &String,
-    keyfile: &std::path::PathBuf,
+    keyfile: Option<&std::path::PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
-    let keypair = read_keypair_from_file(keyfile)?;
+    let keypair = match keyfile {
+        Some(keyfile) => read_keypair_from_file(keyfile)?,
+        None => gen_keypair()?
+    }; 
     let static_key = &keypair.private;
 
     let stream = TcpStream::connect(addr).await.unwrap();

@@ -159,7 +159,7 @@ pub async fn handle_pull_response(
         None => {
             if let Some(file_header) = &file_header {
                 if recv_count == file_header.filesize as usize {
-                    println!("Got file {:?}, size: {:?}, checksum: {:?}, speed: {:?} kb/s", &file_header.filename, &file_header.filesize, &file_header.checksum, speed_kb_pre_sec);
+                    println!("Got file {:?}, size: {:?}, checksum: {:?}, speed: {:.2} kb/s", &file_header.filename, &file_header.filesize, &file_header.checksum, speed_kb_pre_sec);
                 } else {
                     println!("Can not get the file {}, expect file size {}, actual revc size {}", file_header.filename, file_header.filesize, recv_count);
                     if let Some(local_file_path) = &local_file_path {
