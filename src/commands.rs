@@ -42,7 +42,7 @@ pub async fn handle_pull_request(
 ) -> Result<(), Box<dyn Error>> {
     let filepath = Path::new(&pull_request.filepath);
     println!("filepath: {:?}, root_dir: {:?}", &filepath, &root_dir);
-    if !filepath.exists() || !filepath.starts_with(root_dir) {
+    if !filepath.exists() || (root_dir != "/" && !filepath.starts_with(root_dir)) {
         let msg = Message {
             cmd: MessageType::PlainText as u32,
             payload: Bytes::from(format!(
@@ -72,7 +72,7 @@ pub async fn handle_pull_request(
         payload: file_header.serialize(),
     };
     transport.send(msg.serialize()).await?;
-    println!("<- : {}", msg);
+    println!("-> : {}", msg);
 
     // send file chunks
     let f = File::open(filepath).unwrap();
@@ -88,7 +88,7 @@ pub async fn handle_pull_request(
             payload: Bytes::copy_from_slice(&buf[..n]),
         };
         transport.send(msg.serialize()).await?;
-        println!("<- : {}", msg);
+        //println!("-> : {}", msg);
     }
     println!("Send file {:?}, size: {:?}, checksum: {:?}", &file_header.filename, &file_header.filesize, &file_header.checksum);
 
@@ -111,8 +111,8 @@ pub async fn handle_pull_response(
             Ok(request) => {
                 let mut data = request.freeze();
                 let mut msg = Message::deserialize(&mut data);
-                println!("-> : {}", msg);
                 if msg.cmd == MessageType::FileHeader as u32 {
+                    println!("<- : {}", msg);
                     let header = FileHeader::deserialize(&mut msg.payload);
                     let mut file_path = PathBuf::new();
                     file_path.push(&header.filename); // TODO: dir
@@ -120,6 +120,7 @@ pub async fn handle_pull_response(
                     local_file_path = Some(file_path);
                     file_header = Some(header);
                 } else if msg.cmd == MessageType::FileChunk as u32 {
+                    //println!("<- : {}", msg);
                     if let Some(file_header) = &file_header {
                         if let Some(f) = &mut f {
                             f.write_all(&msg.payload)?;
@@ -138,6 +139,7 @@ pub async fn handle_pull_response(
                         }
                     }
                 } else if msg.cmd == MessageType::PlainText as u32 {
+                    println!("<- : {}", msg);
                     error_msg = Some(String::from_utf8_lossy(&msg.payload).to_string());
                     break;
                 } else {
