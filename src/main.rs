@@ -12,6 +12,7 @@ use config::read_user_config;
 use futures::SinkExt;
 use keyring::read_authorized_keys_from_file;
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -19,9 +20,9 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
 use crate::codec::NoiseMessageCodec;
-use crate::commands::{handle_pull_request, handle_pull_response};
+use crate::commands::{cal_file_checksum, handle_pull_request, handle_pull_response, handle_push_request, handle_push_response};
 use crate::keyring::{read_keypair_from_file, write_keypair_to_file};
-use crate::message::{Deserializable, FileHeader, Message, MessageType, PullRequest, Serializable};
+use crate::message::{Deserializable, FileHeader, Message, MessageType, PullRequest, PushRequest, Serializable};
 use crate::noise::{gen_keypair, initiator_handshake, responder_handshake};
 
 struct Context {
@@ -72,6 +73,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .arg_required_else_help(true),
         )
         .subcommand(
+            Command::new("push")
+                .about("push a local file to the peer node")
+                .arg(arg!(<LPATH> "local file path"))
+                .arg(arg!(<RPATH> "remote file path"))
+                .arg(arg!(-p --peer <ADDR> "the peer address"))
+                .arg(
+                    arg!(-k --key <FILE> "the keyring file")
+                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                        .required(false),
+                )
+                .arg_required_else_help(true),
+        )
+        .subcommand(
             Command::new("keygen")
                 .about("gen keyring")
                 .arg(
@@ -105,6 +119,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None => None,
             });
             pull_file(filepath.clone(), addr, keyfile).await?;
+        }
+        Some(("push", matches)) => {
+            let local_filepath = matches.get_one::<String>("LPATH").expect("required");
+            let remote_filepath = matches.get_one::<String>("RPATH").expect("required");
+            let addr = matches.get_one::<String>("peer").expect("required");
+            let keyfile = matches.get_one::<std::path::PathBuf>("key").or(match &config.keyring_file {
+                Some(keyring_file) => Some(&keyring_file),
+                None => None,
+            });
+            push_file(local_filepath.clone(), remote_filepath.clone(), addr, keyfile).await?;
         }
         Some(("keygen", matches)) => {
             let output = matches
@@ -198,7 +222,7 @@ async fn handle_request(context: &Context, transport: &mut Framed<TcpStream, Noi
     //transport.send(response).await?;
 
     let mut msg = Message::deserialize(&mut data);
-    println!("-> : {}", msg);
+    println!("<- : {}", msg);
 
     match MessageType::try_from(msg.cmd) {
         Ok(MessageType::Ping) => {
@@ -214,7 +238,8 @@ async fn handle_request(context: &Context, transport: &mut Framed<TcpStream, Noi
             return handle_pull_request(&context.root_dir, transport, pull_request).await;
         }
         Ok(MessageType::Push) => {
-            // TODO
+            let push_request = PushRequest::deserialize(&mut msg.payload);
+            return handle_push_request(&context.root_dir, transport, push_request).await;
         }
         _ => {
             return Err(Box::from(format!("unknown cmd: {}", msg.cmd)));
@@ -224,6 +249,14 @@ async fn handle_request(context: &Context, transport: &mut Framed<TcpStream, Noi
     Ok(())
 }
 
+/**
+ * < handshake >
+ * pull ->   
+ *      <- file_header
+ *      <- file_chunk
+ *      <- file_chunk
+ *      <- ...
+ */
 async fn pull_file(
     filepath: String,
     addr: &String,
@@ -249,7 +282,66 @@ async fn pull_file(
     println!("<- : {}", cmd);
     transport.send(cmd.serialize()).await?;
 
-    handle_pull_response(&mut transport).await?;
+    handle_pull_response(&mut transport, None).await?;
+
+    Ok(())
+}
+
+/**
+ * < handshake >
+ * push(file_header) ->   
+ *                   <- push_ack(or err)
+ * file_chunk        ->
+ * file_chunk        ->
+ * ...               ->
+ */
+async fn push_file(
+    local_filepath: String,
+    remote_filepath: String,
+    addr: &String,
+    keyfile: Option<&std::path::PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    println!("keyfile: {:?}", keyfile);
+    let mut remote_file = PathBuf::new();
+    remote_file.push(&remote_filepath);
+    let mut local_file = PathBuf::new();
+    local_file.push(local_filepath);
+    if !local_file.exists() {
+        println!("Error: {:?} file is not exists!", local_file);
+        return Ok(()); // TODO: Err()
+    }
+    let local_file_size = local_file.metadata().unwrap().len();
+    let file_header = FileHeader {
+        filename: local_file
+            .file_name()
+            .unwrap()
+            .to_os_string()
+            .into_string()
+            .unwrap(),
+        checksum: cal_file_checksum(local_file.as_path()).unwrap(),
+        filesize: local_file_size
+    };
+
+    let keypair = match keyfile {
+        Some(keyfile) => read_keypair_from_file(keyfile)?,
+        None => gen_keypair()?
+    }; 
+    let static_key = &keypair.private;
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let mut transport = Framed::new(stream, NoiseMessageCodec::new());
+
+    let noise = initiator_handshake(&mut transport, static_key).await?;
+    transport.codec_mut().set_noise(noise);
+
+    let cmd = Message {
+        cmd: MessageType::Push as u32,
+        payload: PushRequest::new(file_header, remote_filepath).serialize(),
+    };
+    println!("-> : {}", cmd);
+    transport.send(cmd.serialize()).await?;
+
+    handle_push_response(&mut transport, local_file, local_file_size, remote_file).await?;
 
     Ok(())
 }

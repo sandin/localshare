@@ -11,10 +11,11 @@ pub enum MessageType {
     Ping = 3,
     Pong = 4,
     Push = 5,
-    Pull = 6,
-    PlainText = 7,
-    FileHeader = 8,
-    FileChunk = 9,
+    PushAck = 6,
+    Pull = 7,
+    PlainText = 8,
+    FileHeader = 9,
+    FileChunk = 10,
 }
 
 impl Display for MessageType {
@@ -25,6 +26,7 @@ impl Display for MessageType {
             MessageType::Ping => write!(f, "Ping"),
             MessageType::Pong => write!(f, "Pong"),
             MessageType::Push => write!(f, "Push"),
+            MessageType::PushAck => write!(f, "PushAck"),
             MessageType::Pull => write!(f, "Pull"),
             MessageType::PlainText => write!(f, "PlainText"),
             MessageType::FileHeader => write!(f, "FileHeader"),
@@ -90,26 +92,12 @@ impl PullRequest {
 impl Serializable for PullRequest {
     fn serialize(&self) -> Bytes {
         Bytes::copy_from_slice(&bincode::serialize(&self).unwrap())
-        /*
-        let bytes = self.filepath.as_bytes();
-        let mut buf = BytesMut::with_capacity(size_of::<u32>() + bytes.len());
-        buf.put_u32_le(bytes.len() as u32);
-        buf.put_slice(&bytes);
-        return buf.freeze();
-        */
     }
 }
 
 impl Deserializable<PullRequest> for PullRequest {
     fn deserialize(bytes: &mut Bytes) -> Self {
         bincode::deserialize(&bytes.to_vec()).unwrap()
-        /*
-        let str_len = bytes.get_u32_le() as usize;
-        let str_data = bytes.slice(0..str_len);
-        PullRequest {
-            filepath: String::from_utf8(str_data.to_vec()).unwrap()
-        }
-        */
     }
 }
 
@@ -127,6 +115,31 @@ impl Serializable for FileHeader {
 }
 
 impl Deserializable<FileHeader> for FileHeader {
+    fn deserialize(bytes: &mut Bytes) -> Self {
+        bincode::deserialize(&bytes.to_vec()).unwrap()
+    }
+}
+
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct PushRequest {
+    pub file_header: FileHeader,
+    pub remote_filepath: String,
+}
+
+impl PushRequest {
+    pub fn new(file_header: FileHeader, remote_filepath: String) -> Self {
+        PushRequest { file_header, remote_filepath }
+    }
+}
+
+impl Serializable for PushRequest {
+    fn serialize(&self) -> Bytes {
+        Bytes::copy_from_slice(&bincode::serialize(&self).unwrap())
+    }
+}
+
+impl Deserializable<PushRequest> for PushRequest {
     fn deserialize(bytes: &mut Bytes) -> Self {
         bincode::deserialize(&bytes.to_vec()).unwrap()
     }
